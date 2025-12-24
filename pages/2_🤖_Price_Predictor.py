@@ -51,6 +51,14 @@ st.markdown("""
         text-align: center;
         box-shadow: 0 0 30px rgba(0, 242, 255, 0.4);
     }
+    
+    .error-margin {
+        background: rgba(255, 193, 7, 0.15);
+        border: 1px solid rgba(255, 193, 7, 0.5);
+        border-radius: 10px;
+        padding: 15px;
+        margin-top: 15px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -74,6 +82,8 @@ def train_model(_df):
     """Train Random Forest model on the data - matching notebook approach"""
     from sklearn.ensemble import RandomForestRegressor
     from sklearn.preprocessing import StandardScaler, LabelEncoder
+    from sklearn.model_selection import train_test_split
+    from sklearn.metrics import mean_absolute_error
     from scipy.stats import boxcox
     
     df = _df.copy()
@@ -104,9 +114,19 @@ def train_model(_df):
     # Handle missing values
     X = X.fillna(X.median())
     
+    # Calculate the actual lambda from the original resale_price
+    original_prices = _df['resale_price'].values
+    positive_prices = original_prices[original_prices > 0]
+    _, fitted_lambda = boxcox(positive_prices)
+    
     # Scale features
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
+    
+    # Split data to calculate error metrics
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_scaled, y, test_size=0.3, random_state=42
+    )
     
     # Train Random Forest (matching notebook parameters)
     rf = RandomForestRegressor(
@@ -118,29 +138,46 @@ def train_model(_df):
         random_state=42,
         n_jobs=-1
     )
-    rf.fit(X_scaled, y)
+    rf.fit(X_train, y_train)
     
-    # Calculate the actual lambda from the original resale_price
-    # We need to reverse-engineer lambda from the boxcox values
-    original_prices = _df['resale_price'].values
-    boxcox_prices = _df['boxcox_resale_price'].values
+    # Calculate MAE in BoxCox space
+    y_pred_test = rf.predict(X_test)
     
-    # Estimate lambda by fitting boxcox on original prices
-    positive_prices = original_prices[original_prices > 0]
-    _, fitted_lambda = boxcox(positive_prices)
+    # Convert predictions and actuals back to USD to get real-world MAE
+    if fitted_lambda != 0:
+        y_test_usd = inv_boxcox(y_test.values, fitted_lambda)
+        y_pred_usd = inv_boxcox(y_pred_test, fitted_lambda)
+    else:
+        y_test_usd = np.exp(y_test.values)
+        y_pred_usd = np.exp(y_pred_test)
     
-    return rf, scaler, feature_names, fitted_lambda, df
+    # Calculate Mean Absolute Error in USD
+    mae_usd = mean_absolute_error(y_test_usd, y_pred_usd)
+    
+    # Retrain on full data for production model
+    rf_full = RandomForestRegressor(
+        n_estimators=200,
+        max_depth=None,
+        min_samples_split=2,
+        min_samples_leaf=1,
+        max_features='sqrt',
+        random_state=42,
+        n_jobs=-1
+    )
+    rf_full.fit(X_scaled, y)
+    
+    return rf_full, scaler, feature_names, fitted_lambda, df, mae_usd
 
 # Load data and model
 raw_df = load_data()
 
 if raw_df is not None:
-    rf_model, scaler, feature_names, lambda_val, processed_df = train_model(raw_df)
+    rf_model, scaler, feature_names, lambda_val, processed_df, mae_usd = train_model(raw_df)
     
     # ================== MAIN UI ==================
     st.title("🤖 AI Price Predictor")
     st.markdown("### Powered by Random Forest Regression")
-    st.caption(f"Model trained with BoxCox λ = {lambda_val:.6f}")
+    st.caption(f"Model trained with BoxCox λ = {lambda_val:.6f} | Average Error: ±${mae_usd:,.0f}")
     
     st.markdown("---")
     
@@ -241,11 +278,14 @@ if raw_df is not None:
         prediction_boxcox = rf_model.predict(input_scaled)[0]
         
         # Inverse BoxCox transformation to get actual price
-        # BoxCox inverse: if lambda != 0: y = (y_transformed * lambda + 1)^(1/lambda)
         if lambda_val != 0:
             predicted_price = inv_boxcox(prediction_boxcox, lambda_val)
         else:
             predicted_price = np.exp(prediction_boxcox)
+        
+        # Calculate price range based on MAE
+        price_low = max(0, predicted_price - mae_usd)
+        price_high = predicted_price + mae_usd
         
         # Display prediction
         st.markdown("---")
@@ -259,7 +299,16 @@ if raw_df is not None:
                 <div style="color: #00f2ff; font-size: 3rem; font-weight: bold; text-shadow: 0 0 20px #00f2ff;">
                     ${predicted_price:,.0f}
                 </div>
-                <div style="color: #7000ff; font-size: 0.9rem; margin-top: 10px;">
+                <div class="error-margin">
+                    <div style="color: #ffc107; font-size: 0.9rem;">📊 Expected Price Range (±MAE)</div>
+                    <div style="color: #fff; font-size: 1.3rem; font-weight: bold; margin-top: 5px;">
+                        ${price_low:,.0f} — ${price_high:,.0f}
+                    </div>
+                    <div style="color: #aaa; font-size: 0.8rem; margin-top: 5px;">
+                        Model Error: ±${mae_usd:,.0f} USD
+                    </div>
+                </div>
+                <div style="color: #7000ff; font-size: 0.9rem; margin-top: 15px;">
                     BoxCox Value: {prediction_boxcox:.4f} | λ: {lambda_val:.4f}
                 </div>
             </div>
@@ -290,6 +339,12 @@ if raw_df is not None:
                 fig.add_vline(x=predicted_price, line_dash="dash", line_color="#ff00ff",
                               annotation_text=f"Prediction: ${predicted_price:,.0f}")
                 
+                # Add error range shading
+                fig.add_vrect(x0=price_low, x1=price_high, 
+                              fillcolor="rgba(255, 193, 7, 0.2)", 
+                              line_width=0,
+                              annotation_text="Error Range")
+                
                 fig.update_layout(template="plotly_dark", 
                                   paper_bgcolor='rgba(0,0,0,0)', 
                                   plot_bgcolor='rgba(0,0,0,0)')
@@ -304,6 +359,7 @@ if raw_df is not None:
                 
                 comparison_metrics = [
                     ("🔮 Your Prediction", f"${predicted_price:,.0f}", "#00f2ff"),
+                    ("📏 Error Margin", f"±${mae_usd:,.0f}", "#ffc107"),
                     ("📊 Market Average", f"${avg_similar:,.0f}", "#64b5f6"),
                     ("📉 Market Median", f"${median_similar:,.0f}", "#90caf9"),
                     ("⬇️ Market Min", f"${min_similar:,.0f}", "#b3e5fc"),
@@ -365,9 +421,15 @@ if raw_df is not None:
         **Features Used:** {len(feature_names)}  
         **Training Samples:** {len(raw_df):,}  
         **BoxCox Lambda:** {lambda_val:.6f}  
+        **Mean Absolute Error (MAE):** ±${mae_usd:,.2f} USD  
         
         The model predicts the BoxCox-transformed resale price, which is then 
         converted back to USD using the inverse BoxCox transformation.
+        
+        **What does MAE mean?**  
+        The Mean Absolute Error indicates that, on average, the model's predictions 
+        are within ±${mae_usd:,.0f} of the actual resale price. This gives you a 
+        realistic expectation of the prediction accuracy.
         """)
 
 else:
