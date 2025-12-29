@@ -273,3 +273,6 @@ Outputs:
 * No regional price segmentation
 * No temporal retraining pipeline
 * Dataset assumes consistent market conditions
+
+## Kaggle
+https://www.kaggle.com/code/ahmedemasha/car-sales-analysis-price-prediction
