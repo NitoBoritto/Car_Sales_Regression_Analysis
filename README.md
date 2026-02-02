@@ -276,3 +276,6 @@ Outputs:
 
 ## Kaggle
 https://www.kaggle.com/code/ahmedemasha/car-sales-analysis-price-prediction
+
+## Dashboard
+https://nitocarsalesdashboard.streamlit.app/
